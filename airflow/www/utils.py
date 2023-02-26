@@ -79,14 +79,6 @@ def get_mapped_instances(task_instance, session):
 
 
 def get_instance_with_map(task_instance, session):
-    print(
-        dict(
-            dag_id = task_instance.dag_id,
-            run_id = task_instance.run_id,
-            task_id = task_instance.task_id,
-            map_index = task_instance.map_index,
-        )
-    )
     if task_instance.map_index == -1:
         return alchemy_to_dict(task_instance)
     mapped_instances = get_mapped_instances(task_instance, session)

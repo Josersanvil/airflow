@@ -2927,13 +2927,13 @@ class Airflow(AirflowBaseView):
         form.execution_date.choices = dt_nr_dr_data["dr_choices"]
 
         print(f"Getting DAG task instances start at {datetime.now().isoformat()}")
-        dag_instances = dag.get_task_instances(dttm, dttm)
+        dag_instances = dag.get_task_instances(dttm, dttm, distinct_task_id=True)
+        print("dag_instances len = ", len(dag_instances))
         print(f"Getting DAG task instances end at {datetime.now().isoformat()}")
-        task_instances = {}
-        for ti in dag_instances:
-            if ti.task_id in task_instances:
-                continue
-            task_instances[ti.task_id] = wwwutils.get_instance_with_map(ti, session)
+        task_instances = {
+            ti.task_id: wwwutils.get_instance_with_map(ti, session)
+            for ti in dag_instances
+        }
         print(f"Getting task instances dict end at {datetime.now().isoformat()}")
         # ---
         # TODO: @josersanvil: REMOVE THIS

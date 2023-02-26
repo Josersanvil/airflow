@@ -1532,6 +1532,7 @@ class DAG(LoggingMixin):
         end_date: datetime | None = None,
         state: list[TaskInstanceState] | None = None,
         session: Session = NEW_SESSION,
+        distinct_task_id=False,
     ) -> list[TaskInstance]:
         if not start_date:
             start_date = (timezone.utcnow() - timedelta(30)).replace(
@@ -1550,7 +1551,14 @@ class DAG(LoggingMixin):
             exclude_task_ids=(),
             session=session,
         )
-        return cast(Query, query).order_by(DagRun.execution_date).all()
+        q_query = cast(Query, query)
+        if distinct_task_id:
+            q_query = q_query.distinct(TaskInstance.task_id).order_by(
+                TaskInstance.task_id, DagRun.execution_date
+            )
+        else:
+            q_query.order_by(DagRun.execution_date)
+        return q_query.all()
 
     @overload
     def _get_task_instances(
