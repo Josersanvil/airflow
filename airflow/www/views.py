@@ -2655,6 +2655,7 @@ class Airflow(AirflowBaseView):
     @provide_session
     def grid(self, dag_id, session=None):
         """Get Dag's grid view."""
+        print("\n\n")
         dag = get_airflow_app().dag_bag.get_dag(dag_id, session=session)
         dag_model = DagModel.get_dagmodel(dag_id, session=session)
         if not dag:
@@ -2665,6 +2666,7 @@ class Airflow(AirflowBaseView):
 
         root = request.args.get("root")
         if root:
+            print("\nPARTIAL SUBSET\n")
             dag = dag.partial_subset(task_ids_or_regex=root, include_downstream=False, include_upstream=True)
 
         num_runs = request.args.get("num_runs", type=int)
@@ -2875,7 +2877,9 @@ class Airflow(AirflowBaseView):
     @provide_session
     def graph(self, dag_id, session=None):
         """Get DAG as Graph."""
-        dag = get_airflow_app().dag_bag.get_dag(dag_id, session=session)
+        app = get_airflow_app()
+        print(f"\n\nGETTING DAG '{dag_id}' AS GRAPH\n\n")
+        dag = app.dag_bag.get_dag(dag_id, session=session)
         dag_model = DagModel.get_dagmodel(dag_id, session=session)
         if not dag:
             flash(f'DAG "{dag_id}" seems to be missing.', "error")
@@ -2892,11 +2896,14 @@ class Airflow(AirflowBaseView):
                 task_ids_or_regex=root, include_upstream=filter_upstream, include_downstream=filter_downstream
             )
         arrange = request.args.get("arrange", dag.orientation)
-
+        
+        print(f"Get task group start at {datetime.now().isoformat()}")
         nodes = task_group_to_dict(dag.task_group)
+        print(f"Get task group end at {datetime.now().isoformat()}")
         edges = dag_edges(dag)
-
+        print(f"Get edges end at {datetime.now().isoformat()}")
         dt_nr_dr_data = get_date_time_num_runs_dag_runs_form_data(request, session, dag)
+        print(f"Get dt_nr_dr_data end at {datetime.now().isoformat()}")
 
         dt_nr_dr_data["arrange"] = arrange
         dttm = dt_nr_dr_data["dttm"]
@@ -2919,10 +2926,21 @@ class Airflow(AirflowBaseView):
         form = GraphForm(data=dt_nr_dr_data)
         form.execution_date.choices = dt_nr_dr_data["dr_choices"]
 
-        task_instances = {
-            ti.task_id: wwwutils.get_instance_with_map(ti, session)
-            for ti in dag.get_task_instances(dttm, dttm)
-        }
+        print(f"Getting DAG task instances start at {datetime.now().isoformat()}")
+        dag_instances = dag.get_task_instances(dttm, dttm)
+        print(f"Getting DAG task instances end at {datetime.now().isoformat()}")
+        task_instances = {}
+        for ti in dag_instances:
+            if ti.task_id in task_instances:
+                continue
+            task_instances[ti.task_id] = wwwutils.get_instance_with_map(ti, session)
+        print(f"Getting task instances dict end at {datetime.now().isoformat()}")
+        # ---
+        # TODO: @josersanvil: REMOVE THIS
+        import json
+        with open(f"/files/tmp/{dag_id}_task_instances.json", "w") as f:
+            json.dump(task_instances, f, indent=4)
+        # ---
         tasks = {
             t.task_id: {
                 "dag_id": t.dag_id,
@@ -2933,6 +2951,7 @@ class Airflow(AirflowBaseView):
             }
             for t in dag.tasks
         }
+        print(f"Getting tasks dictionary end at {datetime.now().isoformat()}")
         if not tasks:
             flash("No tasks found", "error")
         session.commit()
@@ -3540,6 +3559,7 @@ class Airflow(AirflowBaseView):
     @action_logging
     def task_instances(self):
         """Shows task instances."""
+        print("SHOWING TASK INSTANCES")
         dag_id = request.args.get("dag_id")
         dag = get_airflow_app().dag_bag.get_dag(dag_id)
 
@@ -5333,7 +5353,7 @@ class TaskInstanceModelView(AirflowPrivilegeVerifierModelView):
     list_columns = [
         "state",
         "dag_id",
-        "task_id",
+        "task_id", 
         "run_id",
         "map_index",
         "dag_run.execution_date",

@@ -632,6 +632,12 @@ def task_group_to_dict(task_item_or_group):
         }
     task_group = task_item_or_group
     is_mapped = isinstance(task_group, MappedTaskGroup)
+    # ----
+    #TODO: @josersanvil: Remove
+    from datetime import datetime
+
+    print(f"Get children start at {datetime.now().isoformat()}")
+    # ----
     children = [
         task_group_to_dict(child) for child in sorted(task_group.children.values(), key=lambda t: t.label)
     ]
@@ -662,7 +668,7 @@ def task_group_to_dict(task_item_or_group):
                 },
             }
         )
-
+    print(f"Get children end at {datetime.now().isoformat()}")
     return {
         "id": task_group.group_id,
         "value": {
