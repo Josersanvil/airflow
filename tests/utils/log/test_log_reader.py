@@ -22,6 +22,7 @@ import logging
 import os
 import sys
 import tempfile
+from typing import TYPE_CHECKING
 from unittest import mock
 
 import pendulum
@@ -29,17 +30,23 @@ import pytest
 
 from airflow import settings
 from airflow.config_templates.airflow_local_settings import DEFAULT_LOGGING_CONFIG
-from airflow.models import DagRun
 from airflow.models.tasklog import LogTemplate
-from airflow.operators.python import PythonOperator
+from airflow.providers.standard.operators.python import PythonOperator
 from airflow.timetables.base import DataInterval
 from airflow.utils import timezone
 from airflow.utils.log.log_reader import TaskLogReader
 from airflow.utils.log.logging_mixin import ExternalLoggingMixin
 from airflow.utils.state import TaskInstanceState
 from airflow.utils.types import DagRunType
-from tests.test_utils.config import conf_vars
-from tests.test_utils.db import clear_db_dags, clear_db_runs
+
+from tests_common.test_utils.config import conf_vars
+from tests_common.test_utils.db import clear_db_dags, clear_db_runs
+
+pytestmark = [pytest.mark.db_test, pytest.mark.skip_if_database_isolation_mode]
+
+
+if TYPE_CHECKING:
+    from airflow.models import DagRun
 
 
 class TestLogView:
@@ -73,7 +80,6 @@ class TestLogView:
     def configure_loggers(self, log_dir, settings_folder):
         logging_config = copy.deepcopy(DEFAULT_LOGGING_CONFIG)
         logging_config["handlers"]["task"]["base_log_folder"] = log_dir
-        logging_config["handlers"]["task"]["filename_template"] = self.FILENAME_TEMPLATE
         settings_file = os.path.join(settings_folder, "airflow_local_settings_test.py")
         with open(settings_file, "w") as handle:
             new_logging_file = f"LOGGING_CONFIG = {logging_config}"

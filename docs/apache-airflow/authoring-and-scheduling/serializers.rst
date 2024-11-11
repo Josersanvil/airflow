@@ -26,7 +26,7 @@ and efficiency.
 Serialization is a surprisingly hard job. Python out of the box only has support for serialization of primitives,
 like ``str`` and ``int`` and it loops over iterables. When things become more complex, custom serialization is required.
 
-Airflow out of the box supports three ways of custom serialization. Primitives are are returned as is, without
+Airflow out of the box supports three ways of custom serialization. Primitives are returned as is, without
 additional encoding, e.g. a ``str`` remains a ``str``. When it is not a primitive (or iterable thereof) Airflow
 looks for a registered serializer and deserializer in the namespace of ``airflow.serialization.serializers``.
 If not found it will look in the class for a ``serialize()`` method or in case of deserialization a
@@ -42,7 +42,7 @@ It does not need to serialize the values in the dict, that will be taken care of
 form.
 
 Objects that are not under control of Airflow, e.g. ``numpy.int16`` will need a registered serializer and deserializer.
-Versioning is required. Primitives can be returned as can dicts. Again ``dict`` values do not need to be serialized,
+Versioning is required. Primitives, excluding ``bytes``, can be returned as can dicts. Again ``dict`` values do not need to be serialized,
 but its keys need to be of primitive form. In case you are implementing a registered serializer, take special care
 not to have circular imports. Typically, this can be avoided by using ``str`` for populating the list of serializers.
 Like so: ``serializers = ["my.company.Foo"]`` instead of ``serializers = [Foo]``.
@@ -101,6 +101,7 @@ Registered
     deserializers = serializers  # in some cases you might not have a deserializer (e.g. k8s pod)
 
     __version__ = 1  # required
+
 
     # the serializer expects output, classname, version, is_serialized?
     def serialize(o: object) -> tuple[U, str, int, bool]:

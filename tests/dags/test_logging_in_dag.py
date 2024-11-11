@@ -19,18 +19,17 @@ from __future__ import annotations
 
 import logging
 
-from airflow.models import DAG
-from airflow.operators.python import PythonOperator
+from airflow.models.dag import DAG
+from airflow.providers.standard.operators.python import PythonOperator
 from airflow.utils.timezone import datetime
 
 logger = logging.getLogger(__name__)
 
 
 def test_logging_fn(**kwargs):
-    """
-    Tests DAG logging.
+    """Tests DAG logging.
+
     :param kwargs:
-    :return:
     """
     logger.info("Log from DAG Logger")
     kwargs["ti"].log.info("Log from TI Logger")

@@ -23,10 +23,14 @@ import pytest
 from sqlalchemy.pool import NullPool
 
 from airflow import settings
+from airflow.api_internal.internal_api_call import InternalApiConfig
 from airflow.exceptions import AirflowConfigException
-from tests.test_utils.config import conf_vars
+
+from tests_common.test_utils.config import conf_vars
 
 SQL_ALCHEMY_CONNECT_ARGS = {"test": 43503, "dict": {"is": 1, "supported": "too"}}
+
+pytestmark = [pytest.mark.db_test, pytest.mark.skip_if_database_isolation_mode]
 
 
 class TestSqlAlchemySettings:
@@ -34,12 +38,16 @@ class TestSqlAlchemySettings:
         self.old_engine = settings.engine
         self.old_session = settings.Session
         self.old_conn = settings.SQL_ALCHEMY_CONN
+        InternalApiConfig._use_internal_api = False
+        InternalApiConfig._internal_api_endpoint = ""
         settings.SQL_ALCHEMY_CONN = "mysql+foobar://user:pass@host/dbname?inline=param&another=param"
 
     def teardown_method(self):
         settings.engine = self.old_engine
         settings.Session = self.old_session
         settings.SQL_ALCHEMY_CONN = self.old_conn
+        InternalApiConfig._use_internal_api = False
+        InternalApiConfig._internal_api_endpoint = ""
 
     @patch("airflow.settings.setup_event_handlers")
     @patch("airflow.settings.scoped_session")
@@ -51,13 +59,16 @@ class TestSqlAlchemySettings:
         settings.configure_orm()
         mock_create_engine.assert_called_once_with(
             settings.SQL_ALCHEMY_CONN,
-            connect_args={},
+            connect_args={}
+            if not settings.SQL_ALCHEMY_CONN.startswith("sqlite")
+            else {"check_same_thread": False},
             encoding="utf-8",
             max_overflow=10,
             pool_pre_ping=True,
             pool_recycle=1800,
             pool_size=5,
             isolation_level="READ COMMITTED",
+            future=True,
         )
 
     @patch("airflow.settings.setup_event_handlers")
@@ -78,13 +89,14 @@ class TestSqlAlchemySettings:
         with conf_vars(config):
             settings.configure_orm()
             engine_args = {"arg": 1}
-            if settings.SQL_ALCHEMY_CONN.startswith(("mysql", "mssql")):
+            if settings.SQL_ALCHEMY_CONN.startswith("mysql"):
                 engine_args["isolation_level"] = "READ COMMITTED"
             mock_create_engine.assert_called_once_with(
                 settings.SQL_ALCHEMY_CONN,
                 connect_args=SQL_ALCHEMY_CONNECT_ARGS,
                 poolclass=NullPool,
                 encoding="utf-8",
+                future=True,
                 **engine_args,
             )
 

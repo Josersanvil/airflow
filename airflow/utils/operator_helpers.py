@@ -17,12 +17,21 @@
 # under the License.
 from __future__ import annotations
 
+import inspect
+import logging
 from datetime import datetime
-from typing import Any, Callable, Collection, Mapping, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Collection, Mapping, Protocol, TypeVar
 
 from airflow import settings
+from airflow.assets.metadata import Metadata
+from airflow.typing_compat import ParamSpec
 from airflow.utils.context import Context, lazy_mapping_from_context
+from airflow.utils.types import NOTSET
 
+if TYPE_CHECKING:
+    from airflow.utils.context import OutletEventAccessors
+
+P = ParamSpec("P")
 R = TypeVar("R")
 
 DEFAULT_FORMAT_PREFIX = "airflow.ctx."
@@ -62,6 +71,8 @@ AIRFLOW_VAR_NAME_FORMAT_MAPPING = {
 
 def context_to_airflow_vars(context: Mapping[str, Any], in_env_var_format: bool = False) -> dict[str, str]:
     """
+    Return values used to externally reconstruct relations between dags, dag_runs, tasks and task_instances.
+
     Given a context, this function provides a dictionary of values that can be used to
     externally reconstruct relations between dags, dag_runs, tasks and task_instances.
     Default to abc.def.ghi format and can be made to ABC_DEF_GHI format if
@@ -124,7 +135,8 @@ def context_to_airflow_vars(context: Mapping[str, Any], in_env_var_format: bool 
 
 
 class KeywordParameters:
-    """Wrapper representing ``**kwargs`` to a callable.
+    """
+    Wrapper representing ``**kwargs`` to a callable.
 
     The actual ``kwargs`` can be obtained by calling either ``unpacking()`` or
     ``serializing()``. They behave almost the same and are only different if
@@ -155,7 +167,13 @@ class KeywordParameters:
         signature = inspect.signature(func)
         has_wildcard_kwargs = any(p.kind == p.VAR_KEYWORD for p in signature.parameters.values())
 
-        for name in itertools.islice(signature.parameters.keys(), len(args)):
+        for name, param in itertools.islice(signature.parameters.items(), len(args)):
+            # Keyword-only arguments can't be passed positionally and are not checked.
+            if param.kind == inspect.Parameter.KEYWORD_ONLY:
+                continue
+            if param.kind == inspect.Parameter.VAR_KEYWORD:
+                continue
+
             # Check if args conflict with names in kwargs.
             if name in kwargs:
                 raise ValueError(f"The key {name!r} in args is a part of kwargs and therefore reserved.")
@@ -170,7 +188,7 @@ class KeywordParameters:
 
     def unpacking(self) -> Mapping[str, Any]:
         """Dump the kwargs mapping to unpack with ``**`` in a function call."""
-        if self._wildcard and isinstance(self._kwargs, Context):
+        if self._wildcard and isinstance(self._kwargs, Context):  # type: ignore[misc]
             return lazy_mapping_from_context(self._kwargs)
         return self._kwargs
 
@@ -185,12 +203,10 @@ def determine_kwargs(
     kwargs: Mapping[str, Any],
 ) -> Mapping[str, Any]:
     """
-    Inspect the signature of a given callable to determine which arguments in kwargs need
-    to be passed to the callable.
+    Inspect the signature of a callable to determine which kwargs need to be passed to the callable.
 
     :param func: The callable that you want to invoke
-    :param args: The positional arguments that needs to be passed to the callable, so we
-        know how many to skip.
+    :param args: The positional arguments that need to be passed to the callable, so we know how many to skip.
     :param kwargs: The keyword arguments that need to be filtered before passing to the callable.
     :return: A dictionary which contains the keyword arguments that are compatible with the callable.
     """
@@ -199,6 +215,8 @@ def determine_kwargs(
 
 def make_kwargs_callable(func: Callable[..., R]) -> Callable[..., R]:
     """
+    Create a new callable that only forwards necessary arguments from any provided input.
+
     Make a new callable that can accept any number of positional or keyword arguments
     but only forwards those required by the given callable func.
     """
@@ -210,3 +228,63 @@ def make_kwargs_callable(func: Callable[..., R]) -> Callable[..., R]:
         return func(*args, **kwargs)
 
     return kwargs_func
+
+
+class _ExecutionCallableRunner(Protocol):
+    @staticmethod
+    def run(*args, **kwargs): ...
+
+
+def ExecutionCallableRunner(
+    func: Callable[P, R],
+    outlet_events: OutletEventAccessors,
+    *,
+    logger: logging.Logger,
+) -> _ExecutionCallableRunner:
+    """
+    Run an execution callable against a task context and given arguments.
+
+    If the callable is a simple function, this simply calls it with the supplied
+    arguments (including the context). If the callable is a generator function,
+    the generator is exhausted here, with the yielded values getting fed back
+    into the task context automatically for execution.
+
+    This convoluted implementation of inner class with closure is so *all*
+    arguments passed to ``run()`` can be forwarded to the wrapped function. This
+    is particularly important for the argument "self", which some use cases
+    need to receive. This is not possible if this is implemented as a normal
+    class, where "self" needs to point to the ExecutionCallableRunner object.
+
+    The function name violates PEP 8 due to backward compatibility. This was
+    implemented as a class previously.
+
+    :meta private:
+    """
+
+    class _ExecutionCallableRunnerImpl:
+        @staticmethod
+        def run(*args: P.args, **kwargs: P.kwargs) -> R:
+            if not inspect.isgeneratorfunction(func):
+                return func(*args, **kwargs)
+
+            result: Any = NOTSET
+
+            def _run():
+                nonlocal result
+                result = yield from func(*args, **kwargs)
+
+            for metadata in _run():
+                if isinstance(metadata, Metadata):
+                    outlet_events[metadata.uri].extra.update(metadata.extra)
+
+                    if metadata.alias_name:
+                        outlet_events[metadata.alias_name].add(metadata.uri, extra=metadata.extra)
+
+                    continue
+                logger.warning("Ignoring unknown data of %r received from task", type(metadata))
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("Full yielded value: %r", metadata)
+
+            return result
+
+    return _ExecutionCallableRunnerImpl

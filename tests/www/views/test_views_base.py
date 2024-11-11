@@ -22,12 +22,17 @@ import json
 
 import pytest
 
-from airflow.jobs.base_job import BaseJob
+from airflow.jobs.job import Job
+from airflow.jobs.scheduler_job_runner import SchedulerJobRunner
 from airflow.utils import timezone
 from airflow.utils.session import create_session
-from tests.test_utils.asserts import assert_queries_count
-from tests.test_utils.config import conf_vars
-from tests.test_utils.www import check_content_in_response, check_content_not_in_response
+from airflow.www import app as application
+
+from tests_common.test_utils.asserts import assert_queries_count
+from tests_common.test_utils.config import conf_vars
+from tests_common.test_utils.www import check_content_in_response, check_content_not_in_response
+
+pytestmark = pytest.mark.db_test
 
 
 def test_index_redirect(admin_client):
@@ -40,7 +45,7 @@ def test_index_redirect(admin_client):
 
 
 def test_homepage_query_count(admin_client):
-    with assert_queries_count(17):
+    with assert_queries_count(20):
         resp = admin_client.get("/home")
     check_content_in_response("DAGs", resp)
 
@@ -56,58 +61,58 @@ def test_doc_urls(admin_client, monkeypatch):
     check_content_in_response("/api/v1/ui", resp)
 
 
-@pytest.fixture()
+@pytest.fixture
 def heartbeat_healthy():
     # case-1: healthy scheduler status
     last_heartbeat = timezone.utcnow()
-    job = BaseJob(
-        job_type="SchedulerJob",
+    job = Job(
         state="running",
         latest_heartbeat=last_heartbeat,
     )
+    SchedulerJobRunner(job=job)
     with create_session() as session:
         session.add(job)
     yield "healthy", last_heartbeat.isoformat()
     with create_session() as session:
-        session.query(BaseJob).filter(
-            BaseJob.job_type == "SchedulerJob",
-            BaseJob.state == "running",
-            BaseJob.latest_heartbeat == last_heartbeat,
+        session.query(Job).filter(
+            Job.job_type == "SchedulerJob",
+            Job.state == "running",
+            Job.latest_heartbeat == last_heartbeat,
         ).delete()
 
 
-@pytest.fixture()
+@pytest.fixture
 def heartbeat_too_slow():
     # case-2: unhealthy scheduler status - scenario 1 (SchedulerJob is running too slowly)
     last_heartbeat = timezone.utcnow() - datetime.timedelta(minutes=1)
-    job = BaseJob(
-        job_type="SchedulerJob",
+    job = Job(
         state="running",
         latest_heartbeat=last_heartbeat,
     )
+    SchedulerJobRunner(job=job)
     with create_session() as session:
-        session.query(BaseJob).filter(
-            BaseJob.job_type == "SchedulerJob",
+        session.query(Job).filter(
+            Job.job_type == "SchedulerJob",
         ).update({"latest_heartbeat": last_heartbeat - datetime.timedelta(seconds=1)})
         session.add(job)
     yield "unhealthy", last_heartbeat.isoformat()
     with create_session() as session:
-        session.query(BaseJob).filter(
-            BaseJob.job_type == "SchedulerJob",
-            BaseJob.state == "running",
-            BaseJob.latest_heartbeat == last_heartbeat,
+        session.query(Job).filter(
+            Job.job_type == "SchedulerJob",
+            Job.state == "running",
+            Job.latest_heartbeat == last_heartbeat,
         ).delete()
 
 
-@pytest.fixture()
+@pytest.fixture
 def heartbeat_not_running():
     # case-3: unhealthy scheduler status - scenario 2 (no running SchedulerJob)
     with create_session() as session:
-        session.query(BaseJob).filter(
-            BaseJob.job_type == "SchedulerJob",
-            BaseJob.state == "running",
+        session.query(Job).filter(
+            Job.job_type == "SchedulerJob",
+            Job.state == "running",
         ).delete()
-    yield "unhealthy", None
+    return "unhealthy", None
 
 
 @pytest.mark.parametrize(
@@ -152,7 +157,7 @@ def delete_role_if_exists(app):
     return func
 
 
-@pytest.fixture()
+@pytest.fixture
 def non_exist_role_name(delete_role_if_exists):
     role_name = "test_roles_create_role"
     delete_role_if_exists(role_name)
@@ -160,7 +165,7 @@ def non_exist_role_name(delete_role_if_exists):
     delete_role_if_exists(role_name)
 
 
-@pytest.fixture()
+@pytest.fixture
 def exist_role_name(app, delete_role_if_exists):
     role_name = "test_roles_create_role_new"
     app.appbuilder.sm.add_role(role_name)
@@ -168,7 +173,7 @@ def exist_role_name(app, delete_role_if_exists):
     delete_role_if_exists(role_name)
 
 
-@pytest.fixture()
+@pytest.fixture
 def exist_role(app, exist_role_name):
     return app.appbuilder.sm.find_role(exist_role_name)
 
@@ -249,7 +254,7 @@ def test_views_get(request, url, client, content):
 
 
 def _check_task_stats_json(resp):
-    return set(list(resp.json.items())[0][1][0].keys()) == {"state", "count"}
+    return set(next(iter(resp.json.items()))[1][0]) == {"state", "count"}
 
 
 @pytest.mark.parametrize(
@@ -314,7 +319,7 @@ def test_views_post_access_denied(viewer_client, url):
     check_content_in_response("Access is Denied", resp)
 
 
-@pytest.fixture()
+@pytest.fixture
 def non_exist_username(app):
     username = "fake_username"
     user = app.appbuilder.sm.find_user(username)
@@ -344,7 +349,7 @@ def test_create_user(app, admin_client, non_exist_username):
     assert app.appbuilder.sm.find_user(non_exist_username)
 
 
-@pytest.fixture()
+@pytest.fixture
 def exist_username(app, exist_role):
     username = "test_edit_user_user"
     app.appbuilder.sm.add_user(
@@ -400,12 +405,20 @@ def test_page_instance_name_xss_prevention(admin_client):
         check_content_not_in_response(xss_string, resp)
 
 
-@conf_vars(
-    {
-        ("webserver", "instance_name"): "<b>Bold Site Title Test</b>",
-        ("webserver", "instance_name_has_markup"): "True",
-    }
-)
+instance_name_with_markup_conf = {
+    ("webserver", "instance_name"): "<b>Bold Site Title Test</b>",
+    ("webserver", "instance_name_has_markup"): "True",
+}
+
+
+@conf_vars(instance_name_with_markup_conf)
 def test_page_instance_name_with_markup(admin_client):
     resp = admin_client.get("home", follow_redirects=True)
     check_content_in_response("<b>Bold Site Title Test</b>", resp)
+    check_content_not_in_response("&lt;b&gt;Bold Site Title Test&lt;/b&gt;", resp)
+
+
+@conf_vars(instance_name_with_markup_conf)
+def test_page_instance_name_with_markup_title():
+    appbuilder = application.create_app(testing=True).appbuilder
+    assert appbuilder.app_name == "Bold Site Title Test"

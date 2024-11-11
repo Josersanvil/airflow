@@ -29,21 +29,25 @@ import useFilters, {
   RUN_STATE_PARAM,
   RUN_TYPE_PARAM,
   now,
+  FILTER_DOWNSTREAM_PARAM,
+  FILTER_UPSTREAM_PARAM,
+  ROOT_PARAM,
 } from "src/dag/useFilters";
-import type { Task, DagRun, RunOrdering } from "src/types";
+import type { Task, DagRun, RunOrdering, API } from "src/types";
 import { camelCase } from "lodash";
+import useSelection from "src/dag/useSelection";
 
 const DAG_ID_PARAM = "dag_id";
 
 // dagId comes from dag.html
 const dagId = getMetaValue(DAG_ID_PARAM);
 const gridDataUrl = getMetaValue("grid_data_url");
-const urlRoot = getMetaValue("root");
 
 export interface GridData {
   dagRuns: DagRun[];
   groups: Task;
   ordering: RunOrdering;
+  errors: string[];
 }
 
 export const emptyGridData: GridData = {
@@ -54,6 +58,7 @@ export const emptyGridData: GridData = {
     instances: [],
   },
   ordering: [],
+  errors: [],
 };
 
 const formatOrdering = (data: GridData) => ({
@@ -68,14 +73,38 @@ const useGridData = () => {
   const { isRefreshOn, stopRefresh } = useAutoRefresh();
   const errorToast = useErrorToast();
   const {
-    filters: { baseDate, numRuns, runType, runState },
+    filters: {
+      baseDate,
+      numRuns,
+      runType,
+      runState,
+      root,
+      filterDownstream,
+      filterUpstream,
+    },
+    onBaseDateChange,
   } = useFilters();
-
+  const {
+    onSelect,
+    selected: { taskId, runId },
+  } = useSelection();
   const query = useQuery(
-    ["gridData", baseDate, numRuns, runType, runState],
+    [
+      "gridData",
+      baseDate,
+      numRuns,
+      runType,
+      runState,
+      root,
+      filterUpstream,
+      filterDownstream,
+      runId,
+    ],
     async () => {
       const params = {
-        root: urlRoot || undefined,
+        [ROOT_PARAM]: root,
+        [FILTER_UPSTREAM_PARAM]: filterUpstream,
+        [FILTER_DOWNSTREAM_PARAM]: filterDownstream,
         [DAG_ID_PARAM]: dagId,
         [BASE_DATE_PARAM]: baseDate === now ? undefined : baseDate,
         [NUM_RUNS_PARAM]: numRuns,
@@ -85,8 +114,37 @@ const useGridData = () => {
       const response = await axios.get<AxiosResponse, GridData>(gridDataUrl, {
         params,
       });
+      if (runId && !response.dagRuns.find((dr) => dr.runId === runId)) {
+        const dagRunUrl = getMetaValue("dag_run_url")
+          .replace("__DAG_ID__", dagId)
+          .replace("__DAG_RUN_ID__", runId);
+
+        // If the run id cannot be found in the response, try fetching it to see if its real and then adjust the base date filter
+        try {
+          const selectedRun = await axios.get<AxiosResponse, API.DAGRun>(
+            dagRunUrl
+          );
+          if (selectedRun?.executionDate) {
+            onBaseDateChange(selectedRun.executionDate);
+          }
+          // otherwise the run_id isn't valid and we should unselect it
+        } catch (e) {
+          onSelect({ taskId });
+        }
+      }
       // turn off auto refresh if there are no active runs
       if (!areActiveRuns(response.dagRuns)) stopRefresh();
+      // if any errors returned then show as toast message
+      if (response.errors.length > 0) {
+        response.errors.forEach((errorMsg) => {
+          const error = Error(errorMsg);
+          errorToast({
+            title: "Error",
+            error,
+          });
+        });
+      }
+
       return response;
     },
     {

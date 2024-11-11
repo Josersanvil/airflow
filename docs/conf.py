@@ -17,6 +17,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """Configuration of Airflow Docs"""
+
 from __future__ import annotations
 
 # Airflow documentation build configuration file, created by
@@ -31,38 +32,41 @@ from __future__ import annotations
 # All configuration values have a default; values that are commented out
 # serve to show the default.
 import json
+import logging
 import os
 import pathlib
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 import yaml
+from packaging.version import Version, parse as parse_version
 
 import airflow
-from airflow.configuration import AirflowConfigParser, default_config_yaml
+from airflow.configuration import AirflowConfigParser, retrieve_configuration_description
 
 sys.path.append(str(Path(__file__).parent / "exts"))
 
-from docs_build.third_party_inventories import THIRD_PARTY_INDEXES  # noqa: E402
+from docs_build.third_party_inventories import THIRD_PARTY_INDEXES
 
 CONF_DIR = pathlib.Path(__file__).parent.absolute()
 INVENTORY_CACHE_DIR = CONF_DIR / "_inventory_cache"
 ROOT_DIR = CONF_DIR.parent
-FOR_PRODUCTION = os.environ.get("AIRFLOW_FOR_PRODUCTION", "false") == "true"
 
 # By default (e.g. on RTD), build docs for `airflow` package
 PACKAGE_NAME = os.environ.get("AIRFLOW_PACKAGE_NAME", "apache-airflow")
 PACKAGE_DIR: pathlib.Path
+SYSTEM_TESTS_DIR: pathlib.Path | None
 if PACKAGE_NAME == "apache-airflow":
     PACKAGE_DIR = ROOT_DIR / "airflow"
     PACKAGE_VERSION = airflow.__version__
-    SYSTEM_TESTS_DIR = None
+    SYSTEM_TESTS_DIR = (ROOT_DIR / "tests" / "system" / "core").resolve(strict=True)
 elif PACKAGE_NAME.startswith("apache-airflow-providers-"):
     from provider_yaml_utils import load_package_data
 
-    ALL_PROVIDER_YAMLS = load_package_data()
+    ALL_PROVIDER_YAMLS = load_package_data(include_suspended=True)
     try:
         CURRENT_PROVIDER = next(
             provider_yaml
@@ -70,14 +74,18 @@ elif PACKAGE_NAME.startswith("apache-airflow-providers-"):
             if provider_yaml["package-name"] == PACKAGE_NAME
         )
     except StopIteration:
-        raise Exception(f"Could not find provider.yaml file for package: {PACKAGE_NAME}")
-    PACKAGE_DIR = pathlib.Path(CURRENT_PROVIDER["package-dir"])
+        raise RuntimeError(f"Could not find provider.yaml file for package: {PACKAGE_NAME}")
+
+    # Oddity: since we set autoapi_python_use_implicit_namespaces for provider packages, it does a "../"on the
+    # dir we give it. So we want to set the package dir to be airflow so it goes up to src, else we end up
+    # with "src" in the output paths of modules which we don't want
+    PACKAGE_DIR = ROOT_DIR / "providers" / "src" / "airflow"
     PACKAGE_VERSION = CURRENT_PROVIDER["versions"][0]
-    SYSTEM_TESTS_DIR = CURRENT_PROVIDER["system-tests-dir"]
+    SYSTEM_TESTS_DIR = ROOT_DIR / "providers" / "tests" / "system"
 elif PACKAGE_NAME == "apache-airflow-providers":
     from provider_yaml_utils import load_package_data
 
-    PACKAGE_DIR = ROOT_DIR / "airflow" / "providers"
+    PACKAGE_DIR = ROOT_DIR / "providers" / "src"
     PACKAGE_VERSION = "devel"
     ALL_PROVIDER_YAMLS = load_package_data()
     SYSTEM_TESTS_DIR = None
@@ -101,6 +109,17 @@ os.environ["AIRFLOW_PACKAGE_NAME"] = PACKAGE_NAME
 # behavior of the utils.apply_default that was hiding function headers
 os.environ["BUILDING_AIRFLOW_DOCS"] = "TRUE"
 
+# Use for generate rst_epilog and other post-generation substitutions
+global_substitutions = {
+    "version": PACKAGE_VERSION,
+    "airflow-version": airflow.__version__,
+    "experimental": "This is an :ref:`experimental feature <experimental>`.",
+}
+
+if PACKAGE_NAME != "apache-airflow":
+    global_substitutions["experimental"] = "This is an :external:ref:`experimental feature <experimental>`."
+
+
 # == Sphinx configuration ======================================================
 
 # -- Project information -------------------------------------------------------
@@ -113,23 +132,17 @@ version = PACKAGE_VERSION
 # The full version, including alpha/beta/rc tags.
 release = PACKAGE_VERSION
 
-rst_epilog = f"""
-.. |version| replace:: {version}
-.. |airflow-version| replace:: {airflow.__version__}
-.. |experimental| replace:: This is an :ref:`experimental feature <experimental>`.
-"""
-
-smartquotes_excludes = {"builders": ["man", "text", "spelling"]}
-
-
 # -- General configuration -----------------------------------------------------
 # See: https://www.sphinx-doc.org/en/master/usage/configuration.html
+
+rst_epilog = "\n".join(f".. |{key}| replace:: {replace}" for key, replace in global_substitutions.items())
+
+smartquotes_excludes = {"builders": ["man", "text", "spelling"]}
 
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
 extensions = [
-    "provider_init_hack",
     "sphinx.ext.autodoc",
     "sphinx.ext.viewcode",
     "sphinxarg.ext",
@@ -143,6 +156,7 @@ extensions = [
     "sphinx_airflow_theme",
     "redirects",
     "substitution_extensions",
+    "sphinx_design",
 ]
 if PACKAGE_NAME == "apache-airflow":
     extensions.extend(
@@ -170,13 +184,13 @@ if PACKAGE_NAME == "apache-airflow-providers":
 elif PACKAGE_NAME == "helm-chart":
     extensions.append("sphinx_jinja")
 elif PACKAGE_NAME == "docker-stack":
-    # No extra extensions
-    pass
+    extensions.append("extra_files_with_substitutions")
 elif PACKAGE_NAME.startswith("apache-airflow-providers-"):
     extensions.extend(
         [
             "extra_provider_files_with_substitutions",
             "autoapi.extension",
+            "providers_extensions",
         ]
     )
 else:
@@ -226,6 +240,7 @@ if PACKAGE_NAME == "apache-airflow":
         "decorators",
         "example_dags",
         "executors",
+        "models",
         "operators",
         "providers",
         "secrets",
@@ -234,7 +249,23 @@ if PACKAGE_NAME == "apache-airflow":
         "triggers",
         "utils",
     }
-    browsable_utils: set[str] = set()
+    browsable_utils: set[str] = {
+        "state.py",
+    }
+
+    models_included: set[str] = {
+        "baseoperator.py",
+        "baseoperatorlink.py",
+        "connection.py",
+        "dag.py",
+        "dagrun.py",
+        "dagbag.py",
+        "param.py",
+        "taskinstance.py",
+        "taskinstancekey.py",
+        "variable.py",
+        "xcom.py",
+    }
 
     root = ROOT_DIR / "airflow"
     for path in root.iterdir():
@@ -243,13 +274,19 @@ if PACKAGE_NAME == "apache-airflow":
         if path.is_dir() and path.name not in browsable_packages:
             exclude_patterns.append(f"_api/airflow/{path.name}")
 
-    # Don't include all of utils, just the specific ones we decoded to include
+    # Don't include all of utils, just the specific ones we decided to include
     for path in (root / "utils").iterdir():
         if path.name not in browsable_utils:
             exclude_patterns.append(_get_rst_filepath_from_path(path))
+
+    for path in (root / "models").iterdir():
+        if path.name not in models_included:
+            exclude_patterns.append(_get_rst_filepath_from_path(path))
+
+
 elif PACKAGE_NAME != "docker-stack":
     exclude_patterns.extend(
-        _get_rst_filepath_from_path(f) for f in pathlib.Path(PACKAGE_DIR).glob("**/example_dags")
+        _get_rst_filepath_from_path(f) for f in pathlib.Path(PACKAGE_DIR).rglob("example_dags")
     )
 
 # Add any paths that contain templates here, relative to this directory.
@@ -287,6 +324,9 @@ if PACKAGE_NAME in ["apache-airflow", "helm-chart"]:
     html_static_path = [f"{PACKAGE_NAME}/static"]
 else:
     html_static_path = []
+
+html_static_path.append("sphinx_design/static/")  # Style overrides for the sphinx-design extension.
+
 # A list of JavaScript filename. The entry must be a filename string or a
 # tuple containing the filename string and the attributes dictionary. The
 # filename must be relative to the html_static_path, or a full URI with
@@ -301,18 +341,21 @@ if PACKAGE_NAME == "apache-airflow":
     ]
     html_extra_with_substitutions = [
         f"{ROOT_DIR}/docs/apache-airflow/howto/docker-compose/docker-compose.yaml",
-        f"{ROOT_DIR}/docs/docker-stack/build.rst",
     ]
-    # Replace "|version|" in links
+    # Substitute in links
     manual_substitutions_in_generated_html = [
         "installation/installing-from-pypi.html",
         "installation/installing-from-sources.html",
+        "administration-and-deployment/logging-monitoring/advanced-logging-configuration.html",
+        "howto/docker-compose/index.html",
     ]
 if PACKAGE_NAME.startswith("apache-airflow-providers"):
     manual_substitutions_in_generated_html = ["example-dags.html", "operators.html", "index.html"]
 if PACKAGE_NAME == "docker-stack":
-    # Replace "|version|" inside ```` quotes
-    manual_substitutions_in_generated_html = ["build.html"]
+    # Substitute in links
+    manual_substitutions_in_generated_html = ["build.html", "index.html"]
+
+html_css_files = ["custom.css"]
 
 # -- Theme configuration -------------------------------------------------------
 # Custom sidebar templates, maps document names to template names.
@@ -322,7 +365,7 @@ html_sidebars = {
         "searchbox.html",
         "globaltoc.html",
     ]
-    if FOR_PRODUCTION and PACKAGE_VERSION != "devel"
+    if PACKAGE_VERSION != "devel"
     else [
         "searchbox.html",
         "globaltoc.html",
@@ -335,23 +378,17 @@ html_use_index = True
 # If true, "(C) Copyright ..." is shown in the HTML footer. Default is True.
 html_show_copyright = False
 
-# Theme configuration
-if PACKAGE_NAME.startswith("apache-airflow-providers-"):
-    # Only hide hidden items for providers. For Chart and Airflow we are using the approach where
-    # TOC is hidden but sidebar still shows the content (but we are not doing it for providers).
-    html_theme_options: dict[str, Any] = {"hide_website_buttons": True, "sidebar_includehidden": False}
-else:
-    html_theme_options = {"hide_website_buttons": True, "sidebar_includehidden": True}
-if FOR_PRODUCTION:
-    html_theme_options["navbar_links"] = [
-        {"href": "/community/", "text": "Community"},
-        {"href": "/meetups/", "text": "Meetups"},
-        {"href": "/docs/", "text": "Documentation"},
-        {"href": "/use-cases/", "text": "Use-cases"},
-        {"href": "/announcements/", "text": "Announcements"},
-        {"href": "/blog/", "text": "Blog"},
-        {"href": "/ecosystem/", "text": "Ecosystem"},
-    ]
+html_theme_options: dict[str, Any] = {"hide_website_buttons": True, "sidebar_includehidden": True}
+
+html_theme_options["navbar_links"] = [
+    {"href": "/community/", "text": "Community"},
+    {"href": "/meetups/", "text": "Meetups"},
+    {"href": "/docs/", "text": "Documentation"},
+    {"href": "/use-cases/", "text": "Use Cases"},
+    {"href": "/announcements/", "text": "Announcements"},
+    {"href": "/blog/", "text": "Blog"},
+    {"href": "/ecosystem/", "text": "Ecosystem"},
+]
 
 # A dictionary of values to pass into the template engine's context for all pages.
 html_context = {
@@ -386,40 +423,60 @@ html_context = {
 # -- Options for sphinx_jinja ------------------------------------------
 # See: https://github.com/tardyp/sphinx-jinja
 
-# Jinja context
-if PACKAGE_NAME == "apache-airflow":
+airflow_version = parse_version(
+    re.search(  # type: ignore[union-attr,arg-type]
+        r"__version__ = \"([0-9\.]*)(\.dev[0-9]*)?\"",
+        (Path(__file__).parents[1] / "airflow" / "__init__.py").read_text(),
+    ).groups(0)[0]
+)
+
+
+def get_configs_and_deprecations(
+    package_name: str,
+    package_version: Version,
+) -> tuple[dict[str, dict[str, tuple[str, str, str]]], dict[str, dict[str, tuple[str, str, str]]]]:
     deprecated_options: dict[str, dict[str, tuple[str, str, str]]] = defaultdict(dict)
     for (section, key), (
         (deprecated_section, deprecated_key, since_version)
     ) in AirflowConfigParser.deprecated_options.items():
         deprecated_options[deprecated_section][deprecated_key] = section, key, since_version
 
-    configs = default_config_yaml()
+    if package_name == "apache-airflow":
+        configs = retrieve_configuration_description(include_providers=False)
+    else:
+        configs = retrieve_configuration_description(
+            include_airflow=False, include_providers=True, selected_provider=package_name
+        )
 
     # We want the default/example we show in the docs to reflect the value _after_
     # the config has been templated, not before
     # e.g. {{dag_id}} in default_config.cfg -> {dag_id} in airflow.cfg, and what we want in docs
     keys_to_format = ["default", "example"]
-    for conf_name, conf_section in configs.items():
-        for option_name, option in conf_section["options"].items():
+    for conf_section in configs.values():
+        for option_name, option in list(conf_section["options"].items()):
             for key in keys_to_format:
                 if option[key] and "{{" in option[key]:
                     option[key] = option[key].replace("{{", "{").replace("}}", "}")
+            version_added = option["version_added"]
+            if version_added is not None and parse_version(version_added) > package_version:
+                del conf_section["options"][option_name]
+
     # Sort options, config and deprecated options for JINJA variables to display
-    for section_name, config in configs.items():
+    for config in configs.values():
         config["options"] = {k: v for k, v in sorted(config["options"].items())}
     configs = {k: v for k, v in sorted(configs.items())}
     for section in deprecated_options:
         deprecated_options[section] = {k: v for k, v in sorted(deprecated_options[section].items())}
+    return configs, deprecated_options
 
+
+# Jinja context
+if PACKAGE_NAME == "apache-airflow":
+    configs, deprecated_options = get_configs_and_deprecations(PACKAGE_NAME, airflow_version)
     jinja_contexts = {
         "config_ctx": {"configs": configs, "deprecated_options": deprecated_options},
         "quick_start_ctx": {
             "doc_root_url": f"https://airflow.apache.org/docs/apache-airflow/{PACKAGE_VERSION}/"
-            if FOR_PRODUCTION
-            else (
-                "http://apache-airflow-docs.s3-website.eu-central-1.amazonaws.com/docs/apache-airflow/latest/"
-            )
         },
         "official_download_page": {
             "base_url": f"https://downloads.apache.org/airflow/{PACKAGE_VERSION}",
@@ -428,18 +485,13 @@ if PACKAGE_NAME == "apache-airflow":
         },
     }
 elif PACKAGE_NAME.startswith("apache-airflow-providers-"):
-
-    def _load_config():
-        file_path = PACKAGE_DIR / "config_templates" / "config.yml"
-        if not file_path.exists():
-            return {}
-
-        with file_path.open() as f:
-            return yaml.safe_load(f)
-
-    config = _load_config()
+    configs, deprecated_options = get_configs_and_deprecations(PACKAGE_NAME, parse_version(PACKAGE_VERSION))
     jinja_contexts = {
-        "config_ctx": {"configs": config},
+        "config_ctx": {
+            "configs": configs,
+            "deprecated_options": deprecated_options,
+            "package_name": PACKAGE_NAME,
+        },
         "official_download_page": {
             "base_url": "https://downloads.apache.org/airflow/providers",
             "closer_lua_url": "https://www.apache.org/dyn/closer.lua/airflow/providers",
@@ -552,6 +604,8 @@ elif PACKAGE_NAME == "helm-chart":
 autodoc_mock_imports = [
     "MySQLdb",
     "adal",
+    "alibabacloud_adb20211201",
+    "alibabacloud_tea_openapi",
     "analytics",
     "azure",
     "azure.cosmos",
@@ -689,8 +743,6 @@ autoapi_dirs: list[os.PathLike] = []
 if PACKAGE_NAME != "docker-stack":
     autoapi_dirs.append(PACKAGE_DIR)
 
-if SYSTEM_TESTS_DIR and os.path.exists(SYSTEM_TESTS_DIR):
-    autoapi_dirs.append(SYSTEM_TESTS_DIR)
 
 # A directory that has user-defined templates to override our default templates.
 if PACKAGE_NAME == "apache-airflow":
@@ -704,17 +756,75 @@ autoapi_ignore = [
     "*/node_modules/*",
     "*/migrations/*",
     "*/contrib/*",
-    "**/example_sla_dag.py",
-    "**/example_taskflow_api_docker_virtualenv.py",
-    "**/example_dag_decorator.py",
+    "*/example_taskflow_api_docker_virtualenv.py",
+    "*/example_dag_decorator.py",
+    "*/conftest.py",
+    "*/tests/__init__.py",
+    "*/tests/system/__init__.py",
+    "*/test_aws_auth_manager.py",
+    # These sub-folders aren't really providers, but we need __init__.py files else various tools (ruff, mypy)
+    # get confused by providers/tests/systems/cncf/kubernetes and think that folder is the top level
+    # kubernetes module!
+    "*/providers/src/airflow/providers/__init__.py",
+    "*/providers/tests/__init__.py",
+    "*/providers/tests/cncf/__init__.py",
+    "*/providers/tests/common/__init__.py",
+    "*/providers/tests/apache/__init__.py",
+    "*/providers/tests/dbt/__init__.py",
+    "*/providers/tests/microsoft/__init__.py",
+    "*/providers/tests/system/__init__.py",
+    "*/providers/tests/system/apache/__init__.py",
+    "*/providers/tests/system/cncf/__init__.py",
+    "*/providers/tests/system/common/__init__.py",
+    "*/providers/tests/system/dbt/__init__.py",
+    "*/providers/tests/system/microsoft/__init__.py",
 ]
-if PACKAGE_NAME == "apache-airflow":
-    autoapi_ignore.append("*/airflow/providers/*")
-elif PACKAGE_NAME == "docker-stack":
-    autoapi_ignore.append("*/airflow/providers/*")
+
+ignore_re = re.compile(r"\[AutoAPI\] .* Ignoring \s (?P<path>/[\w/.]*)", re.VERBOSE)
+
+
+# Make the "Ignoring /..." log messages slightly less verbose
+def filter_ignore(record: logging.LogRecord) -> bool:
+    matches = ignore_re.search(record.msg)
+    if not matches:
+        return True
+    if matches["path"].endswith("__init__.py"):
+        record.msg = record.msg.replace("__init__.py", "")
+        return True
+    return False
+
+
+autoapi_log = logging.getLogger("sphinx.autoapi.mappers.base")
+autoapi_log.addFilter(filter_ignore)
+
+if PACKAGE_NAME.startswith("apache-airflow-providers-"):
+    autoapi_python_use_implicit_namespaces = True
+    from provider_yaml_utils import load_package_data
+
+    autoapi_ignore.extend(
+        (
+            "*/airflow/__init__.py",
+            "*/airflow/providiers/__init__.py",
+            "*/example_dags/*",
+            "*/airflow/providers/cncf/kubernetes/backcompat/*",
+        )
+    )
+
+    for p in load_package_data(include_suspended=True):
+        if p["package-name"] == PACKAGE_NAME:
+            continue
+        autoapi_ignore.extend((p["package-dir"] + "/*", p["system-tests-dir"] + "/*"))
+
+    autoapi_keep_files = True
+
+    if SYSTEM_TESTS_DIR and os.path.exists(SYSTEM_TESTS_DIR):
+        test_dir = SYSTEM_TESTS_DIR.parent
+        autoapi_dirs.append(test_dir)
+
+        autoapi_ignore.extend(f"{d}/*" for d in test_dir.glob("*") if d.is_dir() and d.name != "system")
 else:
-    autoapi_ignore.append("*/airflow/providers/cncf/kubernetes/backcompat/*")
-    autoapi_ignore.append("*/example_dags/*")
+    if SYSTEM_TESTS_DIR and os.path.exists(SYSTEM_TESTS_DIR):
+        autoapi_dirs.append(SYSTEM_TESTS_DIR)
 # Keep the AutoAPI generated files on the filesystem after the run.
 # Useful for debugging.
 autoapi_keep_files = True
@@ -780,9 +890,32 @@ if PACKAGE_NAME == "apache-airflow":
     # Options for script updater
     redoc_script_url = "https://cdn.jsdelivr.net/npm/redoc@2.0.0-rc.48/bundles/redoc.standalone.js"
 
+elif PACKAGE_NAME == "apache-airflow-providers-fab":
+    OPENAPI_FILE = os.path.join(
+        os.path.dirname(__file__), "..", "airflow", "providers", "fab", "auth_manager", "openapi", "v1.yaml"
+    )
+    redoc = [
+        {
+            "name": "Fab provider REST API",
+            "page": "stable-rest-api-ref",
+            "spec": OPENAPI_FILE,
+            "opts": {
+                "hide-hostname": True,
+                "no-auto-auth": True,
+            },
+        },
+    ]
+
+    # Options for script updater
+    redoc_script_url = "https://cdn.jsdelivr.net/npm/redoc@2.0.0-rc.48/bundles/redoc.standalone.js"
+
 
 def skip_util_classes(app, what, name, obj, skip, options):
-    if (what == "data" and "STATICA_HACK" in name) or ":sphinx-autoapi-skip:" in obj.docstring:
+    if what == "data" and "STATICA_HACK" in name:
+        skip = True
+    elif ":sphinx-autoapi-skip:" in obj.docstring:
+        skip = True
+    elif ":meta private:" in obj.docstring:
         skip = True
     return skip
 

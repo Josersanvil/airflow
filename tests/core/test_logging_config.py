@@ -29,7 +29,8 @@ from unittest.mock import patch
 import pytest
 
 from airflow.configuration import conf
-from tests.test_utils.config import conf_vars
+
+from tests_common.test_utils.config import conf_vars
 
 SETTINGS_FILE_VALID = """
 LOGGING_CONFIG = {
@@ -262,9 +263,12 @@ class TestLoggingSettings:
 
     def test_loading_remote_logging_with_wasb_handler(self):
         """Test if logging can be configured successfully for Azure Blob Storage"""
+        pytest.importorskip(
+            "airflow.providers.microsoft.azure", reason="'microsoft.azure' provider not installed"
+        )
         from airflow.config_templates import airflow_local_settings
         from airflow.logging_config import configure_logging
-        from airflow.utils.log.wasb_task_handler import WasbTaskHandler
+        from airflow.providers.microsoft.azure.log.wasb_task_handler import WasbTaskHandler
 
         with conf_vars(
             {
@@ -316,3 +320,25 @@ class TestLoggingSettings:
                 airflow_local_settings.DEFAULT_LOGGING_CONFIG["handlers"]["task"]["log_group_arn"]
                 == log_group_arn
             )
+
+    def test_loading_remote_logging_with_kwargs(self):
+        """Test if logging can be configured successfully with kwargs"""
+        pytest.importorskip("airflow.providers.amazon", reason="'amazon' provider not installed")
+        from airflow.config_templates import airflow_local_settings
+        from airflow.logging_config import configure_logging
+        from airflow.providers.amazon.aws.log.s3_task_handler import S3TaskHandler
+
+        with conf_vars(
+            {
+                ("logging", "remote_logging"): "True",
+                ("logging", "remote_log_conn_id"): "some_s3",
+                ("logging", "remote_base_log_folder"): "s3://some-folder",
+                ("logging", "remote_task_handler_kwargs"): '{"delete_local_copy": true}',
+            }
+        ):
+            importlib.reload(airflow_local_settings)
+            configure_logging()
+
+        logger = logging.getLogger("airflow.task")
+        assert isinstance(logger.handlers[0], S3TaskHandler)
+        assert getattr(logger.handlers[0], "delete_local_copy") is True

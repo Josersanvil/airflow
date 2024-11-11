@@ -18,8 +18,7 @@
  */
 
 import Color from "color";
-
-import type { DagRun, RunOrdering, Task } from "src/types";
+import type { DagRun, RunOrdering, Task, TaskInstance } from "src/types";
 
 import useOffsetTop from "./useOffsetTop";
 
@@ -48,6 +47,43 @@ const finalStatesMap = () =>
     ["skipped", 0],
     ["no_status", 0],
   ]);
+
+interface GroupSummaryProps {
+  group: Task;
+  runId?: string;
+  mappedStates: TaskInstance["mappedStates"];
+}
+
+const getGroupAndMapSummary = ({
+  group,
+  runId,
+  mappedStates,
+}: GroupSummaryProps) => {
+  let totalTasks = 0;
+  const childTaskMap = finalStatesMap();
+  if (!!group.children && !group.isMapped) {
+    group.children?.forEach((child) => {
+      const taskInstance = child.instances.find((ti) => ti.runId === runId);
+      if (taskInstance) {
+        const stateKey =
+          taskInstance.state == null ? "no_status" : taskInstance.state;
+        if (childTaskMap.has(stateKey)) {
+          childTaskMap.set(stateKey, (childTaskMap.get(stateKey) || 0) + 1);
+        }
+      }
+    });
+  } else if (group.isMapped && mappedStates) {
+    Object.entries(mappedStates).forEach(([key, value]) => {
+      totalTasks += value;
+      childTaskMap.set(key || "no_status", value);
+    });
+  }
+
+  return {
+    totalTasks,
+    childTaskMap,
+  };
+};
 
 const appendSearchParams = (
   url: string | null,
@@ -133,17 +169,61 @@ interface RunLabelProps {
 
 const getDagRunLabel = ({
   dagRun,
-  ordering = ["dataIntervalEnd", "executionDate"],
-}: RunLabelProps) => dagRun[ordering[0]] ?? dagRun[ordering[1]];
+  ordering = ["executionDate"],
+}: RunLabelProps) => dagRun[ordering[0]];
 
 const getStatusBackgroundColor = (color: string, hasNote: boolean) =>
   hasNote
     ? `linear-gradient(-135deg, ${Color(color).hex()}60 5px, ${color} 0);`
     : color;
 
+const toSentenceCase = (camelCase: string): string => {
+  if (camelCase) {
+    const result = camelCase.replace(/([A-Z])/g, " $1");
+    return result[0].toUpperCase() + result.substring(1).toLowerCase();
+  }
+  return "";
+};
+
+const highlightByKeywords = (
+  parsedLine: string,
+  errorKeywords: string[],
+  warningKeywords: string[],
+  logGroupStart: RegExp,
+  logGroupEnd: RegExp
+): string => {
+  // Don't color log marker lines that are already highlighted.
+  if (logGroupStart.test(parsedLine) || logGroupEnd.test(parsedLine)) {
+    return parsedLine;
+  }
+
+  const lowerParsedLine = parsedLine.toLowerCase();
+  const red = (line: string) => `\x1b[1m\x1b[31m${line}\x1b[39m\x1b[0m`;
+  const yellow = (line: string) => `\x1b[1m\x1b[33m${line}\x1b[39m\x1b[0m`;
+
+  const containsError = errorKeywords.some((keyword) =>
+    lowerParsedLine.includes(keyword)
+  );
+
+  if (containsError) {
+    return red(parsedLine);
+  }
+
+  const containsWarning = warningKeywords.some((keyword) =>
+    lowerParsedLine.includes(keyword)
+  );
+
+  if (containsWarning) {
+    return yellow(parsedLine);
+  }
+
+  return parsedLine;
+};
+
 export {
   hoverDelay,
   finalStatesMap,
+  getGroupAndMapSummary,
   getMetaValue,
   appendSearchParams,
   getTask,
@@ -151,4 +231,6 @@ export {
   getDagRunLabel,
   getStatusBackgroundColor,
   useOffsetTop,
+  toSentenceCase,
+  highlightByKeywords,
 };

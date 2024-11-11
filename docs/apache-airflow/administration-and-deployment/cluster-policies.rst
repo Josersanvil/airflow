@@ -43,10 +43,15 @@ There are three main types of cluster policy:
 The DAG and Task cluster policies can raise the  :class:`~airflow.exceptions.AirflowClusterPolicyViolation`
 exception to indicate that the dag/task they were passed is not compliant and should not be loaded.
 
+They can also raise the :class:`~airflow.exceptions.AirflowClusterPolicySkipDag` exception
+when skipping that DAG is needed intentionally. Unlike :class:`~airflow.exceptions.AirflowClusterPolicyViolation`,
+this exception is not displayed on the Airflow web UI (Internally, it's not recorded on ``import_error`` table on meta database.)
+
 Any extra attributes set by a cluster policy take priority over those defined in your DAG file; for example,
 if you set an ``sla`` on your Task in the DAG file, and then your cluster policy also sets an ``sla``, the
 cluster policy's value will take precedence.
 
+.. _administration-and-deployment:cluster-policies-define:
 
 How do define a policy function
 -------------------------------
@@ -57,15 +62,17 @@ There are two ways to configure cluster policies:
    under your $AIRFLOW_HOME is a good "default" location) and then add callables to the file matching one or more
    of the cluster policy names above (e.g. ``dag_policy``).
 
+See :ref:`Configuring local settings <set-config:configuring-local-settings>` for details on how to
+configure local settings.
+
+
 2. By using a
    `setuptools entrypoint <https://packaging.python.org/guides/creating-and-discovering-plugins/#using-package-metadata>`_
    in a custom module using the `Pluggy <https://pluggy.readthedocs.io/en/stable/>`_ interface.
 
    .. versionadded:: 2.6
 
-   .. note:: |experimental|
-
-   This method is more advanced for for people who are already comfortable with python packaging.
+   This method is more advanced and for people who are already comfortable with python packaging.
 
    First create your policy function in a module:
 
@@ -97,9 +104,9 @@ There are two ways to configure cluster policies:
     [project.entry-points.'airflow.policy']
     _ = 'my_airflow_plugin.policies'
 
-   The entrypoint group must be ``airflow.policy``, and the name is ignored. The value should be your module (or class) decorated with the ``@hookimpl`` marker
+   The entrypoint group must be ``airflow.policy``, and the name is ignored. The value should be your module (or class) decorated with the ``@hookimpl`` marker.
 
-   One you have done that, and you have installed your distribution into your Airflow env the policy functions will get called by the various Airflow components. (The exact call order is undefined, so don't rely on any particular calling order if you have multiple plugins).
+   Once you have done that, and you have installed your distribution into your Airflow env, the policy functions will get called by the various Airflow components. (The exact call order is undefined, so don't rely on any particular calling order if you have multiple plugins).
 
 
 One important thing to note (for either means of defining policy functions) is that the argument names must
@@ -160,6 +167,9 @@ For example, your ``airflow_local_settings.py`` might follow this pattern:
         :language: python
         :start-after: [START example_list_of_cluster_policy_rules]
         :end-before: [END example_list_of_cluster_policy_rules]
+
+See :ref:`Configuring local settings <set-config:configuring-local-settings>` for details on how to
+configure local settings.
 
 
 Task instance mutation

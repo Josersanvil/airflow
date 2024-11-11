@@ -19,38 +19,72 @@
 from __future__ import annotations
 
 import json
+from argparse import Namespace
+from typing import TYPE_CHECKING
 from unittest import mock
 
 import pytest
 import requests
+from tenacity import RetryError
 
+from airflow.__main__ import configure_internal_api
 from airflow.api_internal.internal_api_call import InternalApiConfig, internal_api_call
+from airflow.configuration import conf
+from airflow.models.taskinstance import TaskInstance
+from airflow.operators.empty import EmptyOperator
 from airflow.serialization.serialized_objects import BaseSerialization
-from tests.test_utils.config import conf_vars
+from airflow.settings import _ENABLE_AIP_44
+from airflow.utils.state import State
+
+from tests_common.test_utils.config import conf_vars
+
+if TYPE_CHECKING:
+    from airflow.serialization.pydantic.taskinstance import TaskInstancePydantic
+
+pytest.importorskip("pydantic", minversion="2.0.0")
 
 
 @pytest.fixture(autouse=True)
 def reset_init_api_config():
-    InternalApiConfig._initialized = False
+    InternalApiConfig._use_internal_api = False
+    InternalApiConfig._internal_api_endpoint = ""
+    from airflow import settings
+
+    old_engine = settings.engine
+    old_session = settings.Session
+    old_conn = settings.SQL_ALCHEMY_CONN
+    try:
+        yield
+    finally:
+        InternalApiConfig._use_internal_api = False
+        InternalApiConfig._internal_api_endpoint = ""
+        settings.engine = old_engine
+        settings.Session = old_session
+        settings.SQL_ALCHEMY_CONN = old_conn
 
 
+@pytest.mark.skipif(not _ENABLE_AIP_44, reason="AIP-44 is disabled")
 class TestInternalApiConfig:
     @conf_vars(
         {
             ("core", "database_access_isolation"): "false",
             ("core", "internal_api_url"): "http://localhost:8888",
+            ("database", "sql_alchemy_conn"): "none://",
         }
     )
     def test_get_use_internal_api_disabled(self):
+        configure_internal_api(Namespace(subcommand="webserver"), conf)
         assert InternalApiConfig.get_use_internal_api() is False
 
     @conf_vars(
         {
             ("core", "database_access_isolation"): "true",
             ("core", "internal_api_url"): "http://localhost:8888",
+            ("database", "sql_alchemy_conn"): "none://",
         }
     )
     def test_get_use_internal_api_enabled(self):
+        configure_internal_api(Namespace(subcommand="dag-processor"), conf)
         assert InternalApiConfig.get_use_internal_api() is True
         assert InternalApiConfig.get_internal_api_endpoint() == "http://localhost:8888/internal_api/v1/rpcapi"
 
@@ -61,10 +95,11 @@ class TestInternalApiConfig:
         }
     )
     def test_force_database_direct_access(self):
-        InternalApiConfig.force_database_direct_access()
+        InternalApiConfig.set_use_database_access("message")
         assert InternalApiConfig.get_use_internal_api() is False
 
 
+@pytest.mark.skipif(not _ENABLE_AIP_44, reason="AIP-44 is disabled")
 class TestInternalApiCall:
     @staticmethod
     @internal_api_call
@@ -80,6 +115,14 @@ class TestInternalApiCall:
     @internal_api_call
     def fake_class_method_with_params(cls, dag_id: str, session) -> str:
         return f"local-classmethod-call-with-params-{dag_id}"
+
+    @staticmethod
+    @internal_api_call
+    def fake_class_method_with_serialized_params(
+        ti: TaskInstance | TaskInstancePydantic,
+        session,
+    ) -> str:
+        return f"local-classmethod-call-with-serialized-{ti.task_id}"
 
     @conf_vars(
         {
@@ -98,10 +141,12 @@ class TestInternalApiCall:
         {
             ("core", "database_access_isolation"): "true",
             ("core", "internal_api_url"): "http://localhost:8888",
+            ("database", "sql_alchemy_conn"): "none://",
         }
     )
     @mock.patch("airflow.api_internal.internal_api_call.requests")
     def test_remote_call(self, mock_requests):
+        configure_internal_api(Namespace(subcommand="dag-processor"), conf)
         response = requests.Response()
         response.status_code = 200
 
@@ -115,23 +160,45 @@ class TestInternalApiCall:
             {
                 "jsonrpc": "2.0",
                 "method": "tests.api_internal.test_internal_api_call.TestInternalApiCall.fake_method",
-                "params": json.dumps(BaseSerialization.serialize({})),
+                "params": BaseSerialization.serialize({}),
             }
         )
-        mock_requests.post.assert_called_once_with(
-            url="http://localhost:8888/internal_api/v1/rpcapi",
-            data=expected_data,
-            headers={"Content-Type": "application/json"},
-        )
+        mock_requests.post.assert_called_once()
+        call_kwargs: dict = mock_requests.post.call_args.kwargs
+        assert call_kwargs["url"] == "http://localhost:8888/internal_api/v1/rpcapi"
+        assert call_kwargs["data"] == expected_data
+        assert call_kwargs["headers"]["Content-Type"] == "application/json"
+        assert "Authorization" in call_kwargs["headers"]
 
     @conf_vars(
         {
             ("core", "database_access_isolation"): "true",
             ("core", "internal_api_url"): "http://localhost:8888",
+            ("database", "sql_alchemy_conn"): "none://",
+        }
+    )
+    @mock.patch("airflow.api_internal.internal_api_call.requests")
+    def test_remote_call_with_none_result(self, mock_requests):
+        configure_internal_api(Namespace(subcommand="dag-processor"), conf)
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b""
+
+        mock_requests.post.return_value = response
+
+        result = TestInternalApiCall.fake_method()
+        assert result is None
+
+    @conf_vars(
+        {
+            ("core", "database_access_isolation"): "true",
+            ("core", "internal_api_url"): "http://localhost:8888",
+            ("database", "sql_alchemy_conn"): "none://",
         }
     )
     @mock.patch("airflow.api_internal.internal_api_call.requests")
     def test_remote_call_with_params(self, mock_requests):
+        configure_internal_api(Namespace(subcommand="dag-processor"), conf)
         response = requests.Response()
         response.status_code = 200
 
@@ -147,30 +214,31 @@ class TestInternalApiCall:
                 "jsonrpc": "2.0",
                 "method": "tests.api_internal.test_internal_api_call.TestInternalApiCall."
                 "fake_method_with_params",
-                "params": json.dumps(
-                    BaseSerialization.serialize(
-                        {
-                            "dag_id": "fake-dag",
-                            "task_id": 123,
-                        }
-                    )
+                "params": BaseSerialization.serialize(
+                    {
+                        "dag_id": "fake-dag",
+                        "task_id": 123,
+                    }
                 ),
             }
         )
-        mock_requests.post.assert_called_once_with(
-            url="http://localhost:8888/internal_api/v1/rpcapi",
-            data=expected_data,
-            headers={"Content-Type": "application/json"},
-        )
+        mock_requests.post.assert_called_once()
+        call_kwargs: dict = mock_requests.post.call_args.kwargs
+        assert call_kwargs["url"] == "http://localhost:8888/internal_api/v1/rpcapi"
+        assert call_kwargs["data"] == expected_data
+        assert call_kwargs["headers"]["Content-Type"] == "application/json"
+        assert "Authorization" in call_kwargs["headers"]
 
     @conf_vars(
         {
             ("core", "database_access_isolation"): "true",
             ("core", "internal_api_url"): "http://localhost:8888",
+            ("database", "sql_alchemy_conn"): "none://",
         }
     )
     @mock.patch("airflow.api_internal.internal_api_call.requests")
     def test_remote_classmethod_call_with_params(self, mock_requests):
+        configure_internal_api(Namespace(subcommand="dag-processor"), conf)
         response = requests.Response()
         response.status_code = 200
 
@@ -186,17 +254,74 @@ class TestInternalApiCall:
                 "jsonrpc": "2.0",
                 "method": "tests.api_internal.test_internal_api_call.TestInternalApiCall."
                 "fake_class_method_with_params",
-                "params": json.dumps(
-                    BaseSerialization.serialize(
-                        {
-                            "dag_id": "fake-dag",
-                        }
-                    )
+                "params": BaseSerialization.serialize(
+                    {
+                        "dag_id": "fake-dag",
+                    }
                 ),
             }
         )
-        mock_requests.post.assert_called_once_with(
-            url="http://localhost:8888/internal_api/v1/rpcapi",
-            data=expected_data,
-            headers={"Content-Type": "application/json"},
+        mock_requests.post.assert_called_once()
+        call_kwargs: dict = mock_requests.post.call_args.kwargs
+        assert call_kwargs["url"] == "http://localhost:8888/internal_api/v1/rpcapi"
+        assert call_kwargs["data"] == expected_data
+        assert call_kwargs["headers"]["Content-Type"] == "application/json"
+        assert "Authorization" in call_kwargs["headers"]
+
+    @conf_vars(
+        {
+            ("core", "database_access_isolation"): "true",
+            ("core", "internal_api_url"): "http://localhost:8888",
+            ("database", "sql_alchemy_conn"): "none://",
+        }
+    )
+    @mock.patch("airflow.api_internal.internal_api_call.requests")
+    @mock.patch("tenacity.time.sleep")
+    def test_retry_on_bad_gateway(self, mock_sleep, mock_requests):
+        configure_internal_api(Namespace(subcommand="dag-processor"), conf)
+        response = requests.Response()
+        response.status_code = 502
+        response.reason = "Bad Gateway"
+        response._content = b"Bad Gateway"
+
+        mock_sleep = lambda *_, **__: None  # noqa: F841
+        mock_requests.post.return_value = response
+        with pytest.raises(RetryError):
+            TestInternalApiCall.fake_method_with_params("fake-dag", task_id=123, session="session")
+        assert mock_requests.post.call_count == 10
+
+    @conf_vars(
+        {
+            ("core", "database_access_isolation"): "true",
+            ("core", "internal_api_url"): "http://localhost:8888",
+            ("database", "sql_alchemy_conn"): "none://",
+        }
+    )
+    @mock.patch("airflow.api_internal.internal_api_call.requests")
+    def test_remote_call_with_serialized_model(self, mock_requests):
+        configure_internal_api(Namespace(subcommand="dag-processor"), conf)
+        response = requests.Response()
+        response.status_code = 200
+
+        response._content = json.dumps(BaseSerialization.serialize("remote-call"))
+
+        mock_requests.post.return_value = response
+        ti = TaskInstance(task=EmptyOperator(task_id="task"), run_id="run_id", state=State.RUNNING)
+
+        result = TestInternalApiCall.fake_class_method_with_serialized_params(ti, session="session")
+
+        assert result == "remote-call"
+        expected_data = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "method": "tests.api_internal.test_internal_api_call.TestInternalApiCall."
+                "fake_class_method_with_serialized_params",
+                "params": BaseSerialization.serialize({"ti": ti}, use_pydantic_models=True),
+            }
         )
+        mock_requests.post.assert_called_once()
+        call_kwargs: dict = mock_requests.post.call_args.kwargs
+        assert call_kwargs["url"] == "http://localhost:8888/internal_api/v1/rpcapi"
+        assert call_kwargs["data"] == expected_data
+        assert call_kwargs["headers"]["Content-Type"] == "application/json"
+        assert "Authorization" in call_kwargs["headers"]

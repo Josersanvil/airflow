@@ -40,6 +40,10 @@ The time zone is set in ``airflow.cfg``. By default it is set to UTC, but you ch
 an arbitrary IANA time zone, e.g. ``Europe/Amsterdam``. It is dependent on ``pendulum``, which is more accurate than ``pytz``.
 Pendulum is installed when you install Airflow.
 
+.. note::
+     Pendulum relies by default on its own timezone database, which is not updated as frequently as the IANA database.
+     You can make Pendulum rely on the system's database by setting the ``PYTZDATA_TZDATADIR`` environment variable
+     to your system's database, e.g. ``/usr/share/zoneinfo``.
 
 Web UI
 ------
@@ -149,6 +153,13 @@ used to calculate data intervals. Upon first encounter, the start date or end
 date will be converted to UTC using the timezone associated with ``start_date``
 or ``end_date``, then for calculations this timezone information will be
 disregarded.
+
+.. note::
+    When authoring a Timezone aware DAG you must make sure that the underlying timezone library (for example: pendulum)
+    is updated with recent changes to regulations (daylight saving changes etc...). When a change in time
+    is expected you should verify with the underlying timezone library that the switch will happen as expected.
+    There might be a need to update the library version. As a general recommendation if you can author DAGs in UTC
+    that is preferred.
 
 Templates
 '''''''''

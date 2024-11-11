@@ -25,7 +25,6 @@ import subprocess
 import time
 from contextlib import suppress
 from subprocess import CalledProcessError
-from tempfile import NamedTemporaryFile
 from time import sleep
 from unittest import mock
 
@@ -40,6 +39,8 @@ from airflow.utils.process_utils import (
     execute_in_subprocess_with_kwargs,
     set_new_process_group,
 )
+
+pytestmark = pytest.mark.skip_if_database_isolation_mode
 
 
 class TestReapProcessGroup:
@@ -100,6 +101,8 @@ class TestReapProcessGroup:
                 pass
 
 
+@pytest.mark.skip_if_database_isolation_mode
+@pytest.mark.db_test
 class TestExecuteInSubProcess:
     def test_should_print_all_messages1(self, caplog):
         execute_in_subprocess(["bash", "-c", "echo CAT; echo KITTY;"])
@@ -116,6 +119,10 @@ class TestExecuteInSubProcess:
             str(tmp_path),
             "KITTY",
         ] == msgs
+
+    def test_using_env_works(self, caplog):
+        execute_in_subprocess(["bash", "-c", 'echo "My value is ${VALUE}"'], env=dict(VALUE="1"))
+        assert "My value is 1" in caplog.text
 
     def test_should_raise_exception(self):
         with pytest.raises(CalledProcessError):
@@ -136,6 +143,8 @@ def my_sleep_subprocess_with_signals():
     sleep(100)
 
 
+@pytest.mark.skip_if_database_isolation_mode
+@pytest.mark.db_test
 class TestKillChildProcessesByPids:
     def test_should_kill_process(self):
         before_num_process = subprocess.check_output(["ps", "-ax", "-o", "pid="]).decode().count("\n")
@@ -153,13 +162,12 @@ class TestKillChildProcessesByPids:
         assert before_num_process == num_process
 
     def test_should_force_kill_process(self, caplog):
-
         process = multiprocessing.Process(target=my_sleep_subprocess_with_signals, args=())
         process.start()
         sleep(0)
 
         all_processes = subprocess.check_output(["ps", "-ax", "-o", "pid="]).decode().splitlines()
-        assert str(process.pid) in map(lambda x: x.strip(), all_processes)
+        assert str(process.pid) in (x.strip() for x in all_processes)
 
         with caplog.at_level(logging.INFO, logger=process_utils.log.name):
             caplog.clear()
@@ -167,7 +175,7 @@ class TestKillChildProcessesByPids:
             assert f"Killing child PID: {process.pid}" in caplog.messages
         sleep(0)
         all_processes = subprocess.check_output(["ps", "-ax", "-o", "pid="]).decode().splitlines()
-        assert str(process.pid) not in map(lambda x: x.strip(), all_processes)
+        assert str(process.pid) not in (x.strip() for x in all_processes)
 
 
 class TestPatchEnviron:
@@ -206,22 +214,20 @@ class TestCheckIfPidfileProcessIsRunning:
     def test_ok_if_no_file(self):
         check_if_pidfile_process_is_running("some/pid/file", process_name="test")
 
-    def test_remove_if_no_process(self):
+    def test_remove_if_no_process(self, tmp_path):
+        path = tmp_path / "testfile"
+        # limit pid as max of int32, otherwise this test could fail on some platform
+        path.write_text(f"{2**31 - 1}")
+        check_if_pidfile_process_is_running(os.fspath(path), process_name="test")
         # Assert file is deleted
-        with pytest.raises(FileNotFoundError):
-            with NamedTemporaryFile("+w") as f:
-                # limit pid as max of int32, otherwise this test could fail on some platform
-                f.write(f"{2**31 - 1}")
-                f.flush()
-                check_if_pidfile_process_is_running(f.name, process_name="test")
+        assert not path.exists()
 
-    def test_raise_error_if_process_is_running(self):
+    def test_raise_error_if_process_is_running(self, tmp_path):
+        path = tmp_path / "testfile"
         pid = os.getpid()
-        with NamedTemporaryFile("+w") as f:
-            f.write(str(pid))
-            f.flush()
-            with pytest.raises(AirflowException, match="is already running under PID"):
-                check_if_pidfile_process_is_running(f.name, process_name="test")
+        path.write_text(f"{pid}")
+        with pytest.raises(AirflowException, match="is already running under PID"):
+            check_if_pidfile_process_is_running(os.fspath(path), process_name="test")
 
 
 class TestSetNewProcessGroup:

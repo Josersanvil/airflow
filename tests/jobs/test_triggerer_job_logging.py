@@ -24,17 +24,15 @@ import warnings
 import pytest
 
 from airflow.config_templates import airflow_local_settings
-from airflow.jobs import triggerer_job
+from airflow.jobs import triggerer_job_runner
 from airflow.logging_config import configure_logging
 from airflow.providers.amazon.aws.log.s3_task_handler import S3TaskHandler
 from airflow.utils.log.file_task_handler import FileTaskHandler
 from airflow.utils.log.logging_mixin import RedirectStdHandler
 from airflow.utils.log.trigger_handler import DropTriggerLogsFilter, TriggererHandlerWrapper
-from tests.test_utils.config import conf_vars
 
-
-def non_pytest_handlers(val):
-    return [h for h in val if "pytest" not in h.__module__]
+from tests_common.test_utils.config import conf_vars
+from tests_common.test_utils.log_handlers import non_pytest_handlers
 
 
 def assert_handlers(logger, *classes):
@@ -43,15 +41,9 @@ def assert_handlers(logger, *classes):
     return handlers
 
 
-def clear_logger_handlers(log):
-    for h in log.handlers[:]:
-        if "pytest" not in h.__module__:
-            log.removeHandler(h)
-
-
 @pytest.fixture(autouse=True)
 def reload_triggerer_job():
-    importlib.reload(triggerer_job)
+    importlib.reload(triggerer_job_runner)
 
 
 def test_configure_trigger_log_handler_file():
@@ -63,7 +55,6 @@ def test_configure_trigger_log_handler_file():
     """
     # reset logging
     root_logger = logging.getLogger()
-    clear_logger_handlers(root_logger)
     configure_logging()
 
     # before config
@@ -74,11 +65,11 @@ def test_configure_trigger_log_handler_file():
     task_handlers = assert_handlers(task_logger, FileTaskHandler)
 
     # not yet configured to use wrapper
-    assert triggerer_job.HANDLER_SUPPORTS_TRIGGERER is False
+    assert triggerer_job_runner.HANDLER_SUPPORTS_TRIGGERER is False
 
-    triggerer_job.configure_trigger_log_handler()
+    triggerer_job_runner.configure_trigger_log_handler()
     # after config
-    assert triggerer_job.HANDLER_SUPPORTS_TRIGGERER is True
+    assert triggerer_job_runner.HANDLER_SUPPORTS_TRIGGERER is True
     root_handlers = assert_handlers(root_logger, RedirectStdHandler, TriggererHandlerWrapper)
     assert root_handlers[1].base_handler == task_handlers[0]
     # other handlers have DropTriggerLogsFilter
@@ -112,11 +103,11 @@ def test_configure_trigger_log_handler_s3():
     task_logger = logging.getLogger("airflow.task")
     task_handlers = assert_handlers(task_logger, S3TaskHandler)
     # not yet configured to use wrapper
-    assert triggerer_job.HANDLER_SUPPORTS_TRIGGERER is False
+    assert triggerer_job_runner.HANDLER_SUPPORTS_TRIGGERER is False
 
-    triggerer_job.configure_trigger_log_handler()
+    triggerer_job_runner.configure_trigger_log_handler()
     # after config
-    assert triggerer_job.HANDLER_SUPPORTS_TRIGGERER is True
+    assert triggerer_job_runner.HANDLER_SUPPORTS_TRIGGERER is True
     handlers = assert_handlers(root_logger, RedirectStdHandler, TriggererHandlerWrapper)
     assert handlers[1].base_handler == task_handlers[0]
     # other handlers have DropTriggerLogsFilter
@@ -167,15 +158,12 @@ not_found_message = ["Could not find log handler suitable for individual trigger
         ("non_file_task_handler", logging.Handler, not_found_message),
     ],
 )
-def test_configure_trigger_log_handler_not_file_task_handler(cfg, cls, msg):
+def test_configure_trigger_log_handler_not_file_task_handler(cfg, cls, msg, clear_all_logger_handlers):
     """
     No root handler configured.
     When non FileTaskHandler is configured, don't modify.
-    When when an incompatible subclass of FileTaskHandler is configured, don't modify.
+    When an incompatible subclass of FileTaskHandler is configured, don't modify.
     """
-    # reset handlers
-    root_logger = logging.getLogger()
-    clear_logger_handlers(root_logger)
 
     with conf_vars(
         {
@@ -189,6 +177,7 @@ def test_configure_trigger_log_handler_not_file_task_handler(cfg, cls, msg):
         configure_logging()
 
     # no root handlers
+    root_logger = logging.getLogger()
     assert_handlers(root_logger)
 
     # default task logger
@@ -196,16 +185,16 @@ def test_configure_trigger_log_handler_not_file_task_handler(cfg, cls, msg):
     assert_handlers(task_logger, cls)
 
     # not yet configured to use wrapper
-    assert triggerer_job.HANDLER_SUPPORTS_TRIGGERER is False
+    assert triggerer_job_runner.HANDLER_SUPPORTS_TRIGGERER is False
 
     with warnings.catch_warnings(record=True) as captured:
-        triggerer_job.configure_trigger_log_handler()
+        triggerer_job_runner.configure_trigger_log_handler()
 
     assert [x.message.args[0] for x in captured] == msg
 
     # after config
     # doesn't use TriggererHandlerWrapper, no change in handler
-    assert triggerer_job.HANDLER_SUPPORTS_TRIGGERER is False
+    assert triggerer_job_runner.HANDLER_SUPPORTS_TRIGGERER is False
 
     # still no root handlers
     assert_handlers(root_logger)
@@ -218,7 +207,6 @@ fallback_task = {
             "class": "airflow.providers.amazon.aws.log.s3_task_handler.S3TaskHandler",
             "base_log_folder": "~/abc",
             "s3_log_folder": "s3://abc",
-            "filename_template": "blah",
         },
     },
     "loggers": {"airflow.task": {"handlers": ["task"]}},
@@ -246,12 +234,12 @@ def test_configure_trigger_log_handler_fallback_task():
     # before config
     root_logger = logging.getLogger()
     assert_handlers(root_logger)
-    assert triggerer_job.HANDLER_SUPPORTS_TRIGGERER is False
+    assert triggerer_job_runner.HANDLER_SUPPORTS_TRIGGERER is False
 
-    triggerer_job.configure_trigger_log_handler()
+    triggerer_job_runner.configure_trigger_log_handler()
 
     # after config
-    assert triggerer_job.HANDLER_SUPPORTS_TRIGGERER is True
+    assert triggerer_job_runner.HANDLER_SUPPORTS_TRIGGERER is True
 
     handlers = assert_handlers(root_logger, TriggererHandlerWrapper)
     assert handlers[0].base_handler == task_logger.handlers[0]
@@ -297,13 +285,13 @@ def test_configure_trigger_log_handler_root_has_task_handler():
     # before config
     root_logger = logging.getLogger()
     assert_handlers(root_logger, FileTaskHandler)
-    assert triggerer_job.HANDLER_SUPPORTS_TRIGGERER is False
+    assert triggerer_job_runner.HANDLER_SUPPORTS_TRIGGERER is False
 
     # configure
-    triggerer_job.configure_trigger_log_handler()
+    triggerer_job_runner.configure_trigger_log_handler()
 
     # after config
-    assert triggerer_job.HANDLER_SUPPORTS_TRIGGERER is True
+    assert triggerer_job_runner.HANDLER_SUPPORTS_TRIGGERER is True
     handlers = assert_handlers(root_logger, TriggererHandlerWrapper)
     # no filters on wrapper handler
     assert handlers[0].filters == []
@@ -318,7 +306,6 @@ root_not_file_task = {
             "class": "airflow.providers.amazon.aws.log.s3_task_handler.S3TaskHandler",
             "base_log_folder": "~/abc",
             "s3_log_folder": "s3://abc",
-            "filename_template": "blah",
         },
         "trigger": {"class": "logging.Handler"},
     },
@@ -329,7 +316,7 @@ root_not_file_task = {
 }
 
 
-def test_configure_trigger_log_handler_root_not_file_task():
+def test_configure_trigger_log_handler_root_not_file_task(clear_all_logger_handlers):
     """
     root: A handler that doesn't support trigger or inherit FileTaskHandler
     task: Supports triggerer
@@ -354,15 +341,15 @@ def test_configure_trigger_log_handler_root_not_file_task():
     # before config
     root_logger = logging.getLogger()
     assert_handlers(root_logger, logging.Handler)
-    assert triggerer_job.HANDLER_SUPPORTS_TRIGGERER is False
+    assert triggerer_job_runner.HANDLER_SUPPORTS_TRIGGERER is False
 
     # configure
     with warnings.catch_warnings(record=True) as captured:
-        triggerer_job.configure_trigger_log_handler()
+        triggerer_job_runner.configure_trigger_log_handler()
     assert captured == []
 
     # after config
-    assert triggerer_job.HANDLER_SUPPORTS_TRIGGERER is True
+    assert triggerer_job_runner.HANDLER_SUPPORTS_TRIGGERER is True
     handlers = assert_handlers(root_logger, logging.Handler, TriggererHandlerWrapper)
     # other handlers have DropTriggerLogsFilter
     assert handlers[0].filters[0].__class__ == DropTriggerLogsFilter
@@ -379,7 +366,6 @@ root_logger_old_file_task = {
             "class": "airflow.providers.amazon.aws.log.s3_task_handler.S3TaskHandler",
             "base_log_folder": "~/abc",
             "s3_log_folder": "s3://abc",
-            "filename_template": "blah",
         },
         "trigger": {
             "class": "tests.jobs.test_triggerer_job_logging.OldFileTaskHandler",
@@ -410,7 +396,6 @@ def test_configure_trigger_log_handler_root_old_file_task():
             ): "tests.jobs.test_triggerer_job_logging.root_logger_old_file_task",
         }
     ):
-
         configure_logging()
 
     # check custom config used
@@ -420,10 +405,10 @@ def test_configure_trigger_log_handler_root_old_file_task():
     root_logger = logging.getLogger()
     assert_handlers(root_logger, OldFileTaskHandler)
 
-    assert triggerer_job.HANDLER_SUPPORTS_TRIGGERER is False
+    assert triggerer_job_runner.HANDLER_SUPPORTS_TRIGGERER is False
 
     with warnings.catch_warnings(record=True) as captured:
-        triggerer_job.configure_trigger_log_handler()
+        triggerer_job_runner.configure_trigger_log_handler()
 
     # since a root logger is explicitly configured with an old FileTaskHandler which doesn't
     # work properly with individual trigger logging, warn
@@ -435,7 +420,7 @@ def test_configure_trigger_log_handler_root_old_file_task():
     ]
 
     # after config
-    assert triggerer_job.HANDLER_SUPPORTS_TRIGGERER is True
+    assert triggerer_job_runner.HANDLER_SUPPORTS_TRIGGERER is True
     handlers = assert_handlers(root_logger, OldFileTaskHandler, TriggererHandlerWrapper)
     # other handlers have DropTriggerLogsFilter
     assert handlers[0].filters[0].__class__ == DropTriggerLogsFilter

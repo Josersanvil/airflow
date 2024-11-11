@@ -17,16 +17,18 @@
 from __future__ import annotations
 
 from unittest import mock
-from unittest.mock import patch
+from unittest.mock import MagicMock, Mock, call, patch
 
 import pendulum
 import pytest
-from pytest import param
 from sqlalchemy.engine.url import make_url
+from sqlalchemy.exc import OperationalError
 
 from airflow.cli import cli_parser
 from airflow.cli.commands import db_command
 from airflow.exceptions import AirflowException
+
+pytestmark = [pytest.mark.db_test, pytest.mark.skip_if_database_isolation_mode]
 
 
 class TestCliDb:
@@ -36,8 +38,8 @@ class TestCliDb:
 
     @mock.patch("airflow.cli.commands.db_command.db.initdb")
     def test_cli_initdb(self, mock_initdb):
-        db_command.initdb(self.parser.parse_args(["db", "init"]))
-
+        with pytest.warns(expected_warning=DeprecationWarning, match="`db init` is deprecated"):
+            db_command.initdb(self.parser.parse_args(["db", "init"]))
         mock_initdb.assert_called_once_with()
 
     @mock.patch("airflow.cli.commands.db_command.db.resetdb")
@@ -60,69 +62,137 @@ class TestCliDb:
     @pytest.mark.parametrize(
         "args, called_with",
         [
-            ([], dict(to_revision=None, from_revision=None, show_sql_only=False)),
-            (["--show-sql-only"], dict(to_revision=None, from_revision=None, show_sql_only=True)),
-            (["--to-revision", "abc"], dict(to_revision="abc", from_revision=None, show_sql_only=False)),
+            (
+                [],
+                dict(
+                    to_revision=None,
+                    from_revision=None,
+                    show_sql_only=False,
+                ),
+            ),
+            (
+                ["--show-sql-only"],
+                dict(
+                    to_revision=None,
+                    from_revision=None,
+                    show_sql_only=True,
+                ),
+            ),
+            (
+                ["--to-revision", "abc"],
+                dict(
+                    to_revision="abc",
+                    from_revision=None,
+                    show_sql_only=False,
+                ),
+            ),
             (
                 ["--to-revision", "abc", "--show-sql-only"],
                 dict(to_revision="abc", from_revision=None, show_sql_only=True),
             ),
             (
-                ["--to-version", "2.2.2"],
-                dict(to_revision="7b2661a43ba3", from_revision=None, show_sql_only=False),
+                ["--to-version", "2.10.0"],
+                dict(
+                    to_revision="22ed7efa9da2",
+                    from_revision=None,
+                    show_sql_only=False,
+                ),
             ),
             (
-                ["--to-version", "2.2.2", "--show-sql-only"],
-                dict(to_revision="7b2661a43ba3", from_revision=None, show_sql_only=True),
+                ["--to-version", "2.10.0", "--show-sql-only"],
+                dict(
+                    to_revision="22ed7efa9da2",
+                    from_revision=None,
+                    show_sql_only=True,
+                ),
             ),
             (
                 ["--to-revision", "abc", "--from-revision", "abc123", "--show-sql-only"],
-                dict(to_revision="abc", from_revision="abc123", show_sql_only=True),
+                dict(
+                    to_revision="abc",
+                    from_revision="abc123",
+                    show_sql_only=True,
+                ),
             ),
             (
-                ["--to-revision", "abc", "--from-version", "2.2.2", "--show-sql-only"],
-                dict(to_revision="abc", from_revision="7b2661a43ba3", show_sql_only=True),
+                ["--to-revision", "abc", "--from-version", "2.10.0", "--show-sql-only"],
+                dict(
+                    to_revision="abc",
+                    from_revision="22ed7efa9da2",
+                    show_sql_only=True,
+                ),
             ),
             (
-                ["--to-version", "2.2.4", "--from-revision", "abc123", "--show-sql-only"],
-                dict(to_revision="587bdf053233", from_revision="abc123", show_sql_only=True),
+                ["--to-version", "2.10.0", "--from-revision", "abc123", "--show-sql-only"],
+                dict(
+                    to_revision="22ed7efa9da2",
+                    from_revision="abc123",
+                    show_sql_only=True,
+                ),
             ),
             (
-                ["--to-version", "2.2.4", "--from-version", "2.2.2", "--show-sql-only"],
-                dict(to_revision="587bdf053233", from_revision="7b2661a43ba3", show_sql_only=True),
+                ["--to-version", "2.10.0", "--from-version", "2.10.0", "--show-sql-only"],
+                dict(
+                    to_revision="22ed7efa9da2",
+                    from_revision="22ed7efa9da2",
+                    show_sql_only=True,
+                ),
             ),
         ],
     )
     @mock.patch("airflow.cli.commands.db_command.db.upgradedb")
     def test_cli_upgrade_success(self, mock_upgradedb, args, called_with):
-        db_command.upgradedb(self.parser.parse_args(["db", "upgrade", *args]))
+        # TODO(ephraimbuddy): Revisit this when we add more migration files and use other versions/revisions other than 2.10.0/22ed7efa9da2
+        db_command.migratedb(self.parser.parse_args(["db", "migrate", *args]))
         mock_upgradedb.assert_called_once_with(**called_with, reserialize_dags=True)
 
     @pytest.mark.parametrize(
         "args, pattern",
         [
-            param(["--to-version", "2.1.25"], "not supported", id="bad version"),
-            param(
+            pytest.param(
+                ["--to-revision", "abc", "--to-version", "2.10.0"],
+                "Cannot supply both",
+                id="to both version and revision",
+            ),
+            pytest.param(
+                ["--from-revision", "abc", "--from-version", "2.10.0"],
+                "Cannot supply both",
+                id="from both version and revision",
+            ),
+            pytest.param(["--to-version", "2.1.25"], "Unknown version '2.1.25'", id="unknown to version"),
+            pytest.param(["--to-version", "abc"], "Invalid version 'abc'", id="invalid to version"),
+            pytest.param(
                 ["--to-revision", "abc", "--from-revision", "abc123"],
                 "used with `--show-sql-only`",
                 id="requires offline",
             ),
-            param(
-                ["--to-revision", "abc", "--from-version", "2.0.2"],
+            pytest.param(
+                ["--to-revision", "abc", "--from-version", "2.10.0"],
                 "used with `--show-sql-only`",
                 id="requires offline",
             ),
-            param(
-                ["--to-revision", "abc", "--from-version", "2.1.25", "--show-sql-only"],
-                "Unknown version",
-                id="bad version",
+            pytest.param(
+                ["--to-revision", "2.10.0", "--from-version", "2.1.25", "--show-sql-only"],
+                "Unknown version '2.1.25'",
+                id="unknown from version",
+            ),
+            pytest.param(
+                ["--to-revision", "2.10.0", "--from-version", "abc", "--show-sql-only"],
+                "Invalid version 'abc'",
+                id="invalid from version",
             ),
         ],
     )
     @mock.patch("airflow.cli.commands.db_command.db.upgradedb")
-    def test_cli_upgrade_failure(self, mock_upgradedb, args, pattern):
+    def test_cli_sync_failure(self, mock_upgradedb, args, pattern):
         with pytest.raises(SystemExit, match=pattern):
-            db_command.upgradedb(self.parser.parse_args(["db", "upgrade", *args]))
+            db_command.migratedb(self.parser.parse_args(["db", "migrate", *args]))
+
+    @mock.patch("airflow.cli.commands.db_command.migratedb")
+    def test_cli_upgrade(self, mock_migratedb):
+        with pytest.warns(expected_warning=DeprecationWarning, match="`db upgrade` is deprecated"):
+            db_command.upgradedb(self.parser.parse_args(["db", "upgrade"]))
+        mock_migratedb.assert_called_once()
 
     @mock.patch("airflow.cli.commands.db_command.execute_interactive")
     @mock.patch("airflow.cli.commands.db_command.NamedTemporaryFile")
@@ -235,14 +305,14 @@ class TestCliDb:
                 dict(to_revision="abc1", from_revision="abc2", show_sql_only=True),
             ),
             (
-                ["-y", "--to-revision", "abc1", "--from-version", "2.2.2", "-s"],
-                dict(to_revision="abc1", from_revision="7b2661a43ba3", show_sql_only=True),
+                ["-y", "--to-revision", "abc1", "--from-version", "2.10.0", "-s"],
+                dict(to_revision="abc1", from_revision="22ed7efa9da2", show_sql_only=True),
             ),
             (
-                ["-y", "--to-version", "2.2.2", "--from-version", "2.2.2", "-s"],
-                dict(to_revision="7b2661a43ba3", from_revision="7b2661a43ba3", show_sql_only=True),
+                ["-y", "--to-version", "2.10.0", "--from-version", "2.10.0", "-s"],
+                dict(to_revision="22ed7efa9da2", from_revision="22ed7efa9da2", show_sql_only=True),
             ),
-            (["-y", "--to-version", "2.2.2"], dict(to_revision="7b2661a43ba3")),
+            (["-y", "--to-version", "2.10.0"], dict(to_revision="22ed7efa9da2")),
         ],
     )
     @mock.patch("airflow.utils.db.downgrade")
@@ -270,6 +340,27 @@ class TestCliDb:
         else:
             db_command.downgrade(self.parser.parse_args(["db", "downgrade", "--to-revision", "abc"]))
             mock_dg.assert_called_with(to_revision="abc", from_revision=None, show_sql_only=False)
+
+    def test_check(self):
+        retry, retry_delay = 6, 9  # arbitrary but distinct number
+        args = self.parser.parse_args(
+            ["db", "check", "--retry", str(retry), "--retry-delay", str(retry_delay)]
+        )
+        sleep = MagicMock()
+        always_pass = Mock()
+        always_fail = Mock(side_effect=OperationalError("", None, None))
+
+        with patch("time.sleep", new=sleep), patch("airflow.utils.db.check", new=always_pass):
+            db_command.check(args)
+            always_pass.assert_called_once()
+            sleep.assert_not_called()
+
+        with patch("time.sleep", new=sleep), patch("airflow.utils.db.check", new=always_fail):
+            with pytest.raises(OperationalError):
+                db_command.check(args)
+            # With N retries there are N+1 total checks, hence N sleeps
+            always_fail.assert_has_calls([call()] * (retry + 1))
+            sleep.assert_has_calls([call(retry_delay)] * retry)
 
 
 class TestCLIDBClean:
